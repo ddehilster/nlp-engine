@@ -1,0 +1,80 @@
+name: Version Check
+
+# Fails a PR when engine source changed but NLP_ENGINE_VERSION (nlp/main.cpp)
+# was not bumped relative to the base branch. Prevents merging a code change
+# that forgets the version bump.
+#
+# Skip on intentional no-bump PRs (docs, CI, refactors) by either:
+#   - putting [skip-version] anywhere in the PR title, or
+#   - adding the "skip-version" label to the PR.
+#
+# NOTE: adding this workflow makes the check RUN. To actually BLOCK the merge
+# button, add "Version Check / version-check" as a required status check in the
+# repo's branch protection rule for master.
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, labeled, unlabeled]
+
+jobs:
+  version-check:
+    name: version-check
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout (full history)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Check NLP_ENGINE_VERSION was bumped
+        env:
+          BASE_REF: ${{ github.base_ref }}
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_LABELS: ${{ join(github.event.pull_request.labels.*.name, ',') }}
+        run: |
+          set -euo pipefail
+
+          # Opt-out paths.
+          if printf '%s' "$PR_TITLE" | grep -qiF '[skip-version]'; then
+            echo "::notice::[skip-version] in PR title — skipping version check."
+            exit 0
+          fi
+          if printf '%s' ",$PR_LABELS," | grep -qiF ',skip-version,'; then
+            echo "::notice::skip-version label present — skipping version check."
+            exit 0
+          fi
+
+          git fetch --no-tags --depth=1 origin "$BASE_REF"
+          BASE="origin/$BASE_REF"
+
+          # Source globs that warrant a version bump.
+          SRC_RE='^(lite|src|include|nlp)/'
+
+          CHANGED=$(git diff --name-only "$BASE"...HEAD || true)
+          if ! printf '%s\n' "$CHANGED" | grep -qE "$SRC_RE"; then
+            echo "::notice::No engine source changed — version bump not required."
+            exit 0
+          fi
+
+          extract() { grep -oP '#define\s+NLP_ENGINE_VERSION\s+"\K[^"]+' "$1" | head -1; }
+
+          HEAD_VER=$(extract nlp/main.cpp || true)
+          git show "$BASE:nlp/main.cpp" > /tmp/base_main.cpp 2>/dev/null || : > /tmp/base_main.cpp
+          BASE_VER=$(extract /tmp/base_main.cpp || true)
+
+          echo "Base version: ${BASE_VER:-<none>}"
+          echo "PR   version: ${HEAD_VER:-<none>}"
+
+          if [ -z "$HEAD_VER" ]; then
+            echo "::error file=nlp/main.cpp::NLP_ENGINE_VERSION not found in nlp/main.cpp."
+            exit 1
+          fi
+
+          if [ "$HEAD_VER" = "$BASE_VER" ]; then
+            echo "::error file=nlp/main.cpp::Engine source changed but NLP_ENGINE_VERSION is still $HEAD_VER. Bump it, or add [skip-version] to the PR title / the skip-version label if no release is intended."
+            echo "Changed source files:"
+            printf '%s\n' "$CHANGED" | grep -E "$SRC_RE" | sed 's/^/  /'
+            exit 1
+          fi
+
+          echo "Version bumped $BASE_VER -> $HEAD_VER. OK."
