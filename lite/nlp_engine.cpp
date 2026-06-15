@@ -279,6 +279,7 @@ int NLP_ENGINE::init(
             std::_t_cerr << _T("[Couldn't make knowledge base.]") << std::endl;  // 07/21/03 AM.
             m_vtrun->rmAna(m_nlp);  // 09/27/20 AM.
             m_vtrun->deleteNLP(m_nlp);                                     // 07/21/03 AM.
+            m_nlp = 0;  // NLP-ENGINE-528: avoid dangling ptr; analyze() must not deref a deleted NLP.
     //        VTRun::deleteVTRun(m_vtrun);                                 // 07/21/03 AM.
             return -1;
         }
@@ -312,6 +313,7 @@ int NLP_ENGINE::init(
             std::_t_cerr << _T("[Couldn't build analyzer.]") << std::endl;
             m_vtrun->rmAna(m_nlp);  // 09/27/20 AM.
             m_vtrun->deleteNLP(m_nlp);                                     // 07/21/03 AM.
+            m_nlp = 0;  // NLP-ENGINE-528: avoid dangling ptr; analyze() must not deref a deleted NLP.
     //        VTRun::deleteVTRun(m_vtrun);                                 // 07/21/03 AM.
             return -1;
             }
@@ -347,11 +349,20 @@ int NLP_ENGINE::analyze(
     bool compileKB
 	)
 {
-    NLP_ENGINE::init(analyzer,develop,silent,compile,compiled,compileKB);
+    // NLP-ENGINE-528: respect init() failure. On a re-entrant analyze() in a
+    // long-lived process (e.g. the node/python addon), a name-collision in
+    // addAna can leave a fresh NLP unregistered; if make_analyzer/makeCG then
+    // fails, init() deletes m_nlp and returns -1. Charging ahead used to deref
+    // the freed m_nlp below (setIsLastFile) and SIGSEGV. Bail out cleanly.
+    if (NLP_ENGINE::init(analyzer,develop,silent,compile,compiled,compileKB) < 0)
+        return -1;
 
     // Compile mode: C++ code generation is done in init(); do not run analysis.
     if (m_compile || m_compileKB)
         return 0;
+
+    if (!m_nlp)  // defensive: never analyze without a live analyzer object.
+        return -1;
 
     readFiles(infile);
     std::string file;
